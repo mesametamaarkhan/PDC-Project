@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <iostream>
 #include <metis.h>
+#include <fstream>
+#include <sstream>
 
 struct Vertex {
     int id;
@@ -244,7 +246,7 @@ public:
             }
         }
         
-        if (total_recv < 0 || total_recv > 1000) {
+        if (total_recv < 0) {
             std::cerr << "Rank " << rank << ": Invalid total_recv=" << total_recv << std::endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -704,7 +706,7 @@ public:
         int total_recv = 0;
         bool all_zero = true;
         for (int i = 0; i < size; i++) {
-            if (recv_counts[i] < 0 || recv_counts[i] > 1000) { // Arbitrary limit for safety
+            if (recv_counts[i] < 0 || recv_counts[i] > 10000000) {
                 std::cerr << "Rank " << rank << ": Invalid recv_counts[" << i << "]=" << recv_counts[i] << std::endl;
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
@@ -714,7 +716,7 @@ public:
                 displacements[i] = displacements[i-1] + recv_counts[i-1];
             }
         }
-        if (total_recv < 0 || total_recv > 10000) { // Larger arbitrary limit for total
+        if (total_recv < 0) {
             std::cerr << "Rank " << rank << ": Invalid total_recv=" << total_recv << std::endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -983,6 +985,16 @@ public:
                 std::cerr << "Rank 0: Result vertex " << entry.first << ": distance=" << entry.second << std::endl;
             }
         }
+
+        if (rank == 0) {
+            std::ofstream outfile("sssp_result.csv");
+            outfile << "vertex,distance\n";
+            for (const auto& entry : global_result) {
+                outfile << entry.first << "," << (entry.second == -1 ? "INF" : std::to_string(entry.second)) << "\n";
+            }
+            outfile.close();
+            std::cout << "Results written to sssp_result.csv" << std::endl;
+        }
     
         std::cerr << "Rank " << rank << ": Exiting getResult" << std::endl;
         return global_result;
@@ -1003,44 +1015,30 @@ int main(int argc, char* argv[]) {
     std::vector<std::tuple<int, int, int>> edges;
     int num_vertices = 0;
     if (rank == 0) {
-        // Create a larger graph with 20 vertices and 40 edges
-        num_vertices = 20;
-        
-        // Add edges to create a connected graph
-        // First, create a cycle to ensure connectivity
-        for (int i = 0; i < num_vertices; i++) {
-            edges.push_back({i, (i + 1) % num_vertices, 1 + (i % 5)}); // Weight varies from 1 to 5
+        std::ifstream infile("graph.txt");
+        std::string line;
+        int max_node = -1;
+        while (std::getline(infile, line)) {
+            std::istringstream iss(line);
+            int u, v, w;
+            if (!(iss >> u >> v >> w)) continue;
+            edges.emplace_back(u, v, w);
+            max_node = std::max({max_node, u, v});
         }
-        
-        // Add some random edges to create a denser graph
-        for (int i = 0; i < 20; i++) {
-            int u = rand() % num_vertices;
-            int v = rand() % num_vertices;
-            if (u != v) {
-                edges.push_back({u, v, 1 + (rand() % 10)}); // Weight varies from 1 to 10
-            }
-        }
-        
-        // Remove duplicate edges
-        std::sort(edges.begin(), edges.end());
-        edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
-        
-        std::cout << "Created graph with " << num_vertices << " vertices and " << edges.size() << " edges" << std::endl;
+        num_vertices = max_node + 1;
+        std::cout << "Loaded graph.txt with " << num_vertices << " vertices and " << edges.size() << " edges" << std::endl;
     }
     std::cerr << "Rank " << rank << ": Before broadcast, num_vertices=" << num_vertices << std::endl;
 
-    // Broadcast number of vertices
     MPI_Bcast(&num_vertices, 1, MPI_INT, 0, MPI_COMM_WORLD);
     std::cerr << "Rank " << rank << ": After broadcast, num_vertices=" << num_vertices << std::endl;
 
-    // Broadcast edges
     int num_edges = edges.size();
     MPI_Bcast(&num_edges, 1, MPI_INT, 0, MPI_COMM_WORLD);
     if (rank != 0) {
         edges.resize(num_edges);
     }
 
-    // Create MPI datatype for edge tuples
     MPI_Datatype mpi_edge_type;
     int blocklengths[3] = {1, 1, 1};
     MPI_Aint disps[3];
@@ -1061,7 +1059,6 @@ int main(int argc, char* argv[]) {
     std::cerr << "Rank " << rank << ": Edges received, size=" << edges.size() << std::endl;
     MPI_Type_free(&mpi_edge_type);
 
-    // Manual partitioning for small test case (avoids unbalanced partitioning)
     if (rank == 0) {
         std::cout << "Partitioning graph..." << std::endl;
     }
@@ -1069,14 +1066,11 @@ int main(int argc, char* argv[]) {
     sssp.loadAndPartitionGraph(edges, num_vertices);
     std::cerr << "Rank " << rank << ": Graph partitioned" << std::endl;
 
-    // Compute initial SSSP
     sssp.computeInitialSSSP();
     
-    // Ensure all processes are synchronized before getting results
     MPI_Barrier(MPI_COMM_WORLD);
     std::cerr << "Rank " << rank << ": Initial SSSP computed" << std::endl;
 
-    // Get and display initial results
     auto result = sssp.getResult();
     if (rank == 0) {
         std::cout << "Initial SSSP result:" << std::endl;
@@ -1087,17 +1081,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Process edge changes
     std::vector<EdgeChange> changes;
     if (rank == 0) {
-        // Add a few random edge changes
-        for (int i = 0; i < 5; i++) {
-            int u = rand() % num_vertices;
-            int v = rand() % num_vertices;
-            if (u != v) {
-                changes.push_back({u, v, 1 + (rand() % 10), true}); // Random weight from 1 to 10
-            }
-        }
+        // No edge changes for file-based input by default
     }
     
     int num_changes = changes.size();
@@ -1106,7 +1092,6 @@ int main(int argc, char* argv[]) {
         changes.resize(num_changes);
     }
 
-    // Create MPI datatype for edge changes
     MPI_Datatype mpi_change_type;
     int change_blocklengths[4] = {1, 1, 1, 1};
     MPI_Aint change_disps[4];
@@ -1127,20 +1112,16 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(changes.data(), num_changes, mpi_change_type, 0, MPI_COMM_WORLD);
     MPI_Type_free(&mpi_change_type);
 
-    // Process edge changes
     sssp.processEdgeChanges(changes);
     std::cerr << "Rank " << rank << ": Edge changes processed" << std::endl;
 
-    // Synchronize before getting updated results
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // Check for load imbalance
     bool need_rebalance = sssp.checkLoadBalance();
     if (need_rebalance) {
         sssp.repartitionGraph();
     }
 
-    // Get and display updated results
     result = sssp.getResult();
     if (rank == 0) {
         std::cout << "Updated SSSP result after edge changes:" << std::endl;
