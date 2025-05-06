@@ -57,6 +57,7 @@ public:
         boundary_vertices.resize(size);
     }
     
+    // Loads the graph, partitions it, and initializes data structures
     void loadAndPartitionGraph(const std::vector<std::tuple<int, int, int>>& edges, int num_vertices) {
         std::cerr << "Rank " << rank << ": Entering loadAndPartitionGraph, num_vertices=" << num_vertices << ", edges=" << edges.size() << std::endl;
         this->num_vertices = num_vertices;
@@ -132,6 +133,7 @@ public:
         std::cerr << "Rank " << rank << ": loadAndPartitionGraph completed" << std::endl;
     }
     
+    // Builds the local subgraph for this process
     void buildLocalGraph(const std::vector<std::vector<std::pair<int, int>>>& adj_list, int num_vertices) {
         std::cerr << "Rank " << rank << ": Entering buildLocalGraph, num_vertices=" << num_vertices << std::endl;
         int local_idx = 0;
@@ -183,6 +185,7 @@ public:
         std::cerr << "Rank " << rank << ": Local graph edges assigned" << std::endl;
     }
     
+    // Identifies boundary vertices that connect to other partitions
     void identifyBoundaryVertices(const std::vector<std::vector<std::pair<int, int>>>& adj_list) {
         std::cerr << "Rank " << rank << ": Entering identifyBoundaryVertices" << std::endl;
         
@@ -277,6 +280,7 @@ public:
         std::cerr << "Rank " << rank << ": identifyBoundaryVertices completed" << std::endl;
     }
     
+    // Computes the initial Single Source Shortest Path (SSSP) solution
     void computeInitialSSSP() {
         std::cerr << "Rank " << rank << ": Starting computeInitialSSSP, local_graph.size=" << local_graph.size() << std::endl;
         if (local_graph.empty()) {
@@ -348,6 +352,7 @@ public:
         std::cerr << "Rank " << rank << ": Finished computeInitialSSSP" << std::endl;
     }
     
+    // Processes a batch of edge insertions or deletions
     void processEdgeChanges(const std::vector<EdgeChange>& changes) {
         bool local_changes = false;
         std::cerr << "Rank " << rank << ": Starting processEdgeChanges, num_changes=" << changes.size() << std::endl;
@@ -446,6 +451,7 @@ public:
         updateSSSP();
     }
     
+    // Updates SSSP after an edge insertion
     void updateAfterEdgeInsertion(int u, int v, int weight) {
         std::cerr << "Rank " << rank << ": updateAfterEdgeInsertion for edge (" << u << "," << v << "), weight=" << weight << std::endl;
     
@@ -455,11 +461,9 @@ public:
     
             if (u_dist != std::numeric_limits<int>::max()) {
                 if (vertex_partition[v] == rank) {
-                    // Both endpoints in this partition
                     int local_v = global_to_local[v];
                     int v_dist = local_graph[local_v].distance;
     
-                    // Check if the new edge provides a shorter path to v
                     if (u_dist + weight < v_dist) {
                         local_graph[local_v].distance = u_dist + weight;
                         local_graph[local_v].parent = local_u;
@@ -468,7 +472,6 @@ public:
                         std::cerr << "Rank " << rank << ": Updated local vertex " << v << " distance=" << (u_dist + weight) << std::endl;
                     }
     
-                    // Check if the new edge provides a shorter path to u
                     if (v_dist != std::numeric_limits<int>::max() && v_dist + weight < u_dist) {
                         local_graph[local_u].distance = v_dist + weight;
                         local_graph[local_u].parent = local_v;
@@ -477,7 +480,6 @@ public:
                         std::cerr << "Rank " << rank << ": Updated local vertex " << u << " distance=" << (v_dist + weight) << std::endl;
                     }
     
-                    // If either vertex is a boundary, send update
                     if (local_graph[local_u].boundary || local_graph[local_v].boundary) {
                         BoundaryUpdate update_u;
                         update_u.global_vertex_id = u;
@@ -493,7 +495,6 @@ public:
                         std::cerr << "Rank " << rank << ": Added boundary updates for vertices " << u << " and " << v << std::endl;
                     }
                 } else {
-                    // v is in another partition
                     int new_dist = u_dist + weight;
                     BoundaryUpdate update;
                     update.global_vertex_id = v;
@@ -504,7 +505,6 @@ public:
                 }
             }
         } else if (vertex_partition[v] == rank) {
-            // u is in another partition, v is local
             int local_v = global_to_local[v];
             int v_dist = local_graph[local_v].distance;
     
@@ -519,9 +519,8 @@ public:
         }
     }
     
-    // Update SSSP after edge deletion
+    // Updates SSSP after an edge deletion
     void updateAfterEdgeDeletion() {
-        // Reset all affected nodes to infinity except the source
         for (auto& vertex : local_graph) {
             if (vertex.affected && local_to_global[vertex.id] != source_vertex) {
                 vertex.distance = std::numeric_limits<int>::max();
@@ -529,7 +528,6 @@ public:
             }
         }
         
-        // Starting from the source, recompute distances for affected nodes
         for (size_t i = 0; i < local_graph.size(); i++) {
             if (local_to_global[i] == source_vertex) {
                 local_graph[i].distance = 0;
@@ -538,23 +536,18 @@ public:
             }
         }
         
-        // Use the update priority queue to process vertices in order of increasing distance
         while (!update_queue.empty()) {
             int dist = update_queue.top().first;
             int u = update_queue.top().second;
             update_queue.pop();
             
-            // Skip if we've found a better path already
             if (dist > local_graph[u].distance) continue;
             
-            // Process neighbors
             for (const auto& edge : local_graph[u].neighbors) {
                 int v = edge.first;
                 int weight = edge.second;
                 
-                // If v is a global ID (boundary vertex)
                 if (global_to_local.find(v) == global_to_local.end()) {
-                    // Add to send buffer for boundary update
                     BoundaryUpdate update;
                     update.global_vertex_id = local_to_global[u];
                     update.new_distance = local_graph[u].distance;
@@ -563,11 +556,9 @@ public:
                     continue;
                 }
                 
-                // Convert to local ID if needed
                 int local_v = (global_to_local.find(v) != global_to_local.end()) ? 
                              global_to_local[v] : v;
                 
-                // Relax edge
                 int new_dist = local_graph[u].distance + weight;
                 if (new_dist < local_graph[local_v].distance) {
                     local_graph[local_v].distance = new_dist;
@@ -575,7 +566,6 @@ public:
                     local_graph[local_v].affected = true;
                     update_queue.push({new_dist, local_v});
                     
-                    // If this is a boundary vertex, prepare update for other partitions
                     if (local_graph[local_v].boundary) {
                         BoundaryUpdate update;
                         update.global_vertex_id = local_to_global[local_v];
@@ -588,13 +578,13 @@ public:
         }
     }
     
+    // Updates the SSSP solution after edge changes
     void updateSSSP() {
         bool global_changes;
         bool local_changes = false;
         int iteration = 0;
         std::cerr << "Rank " << rank << ": Starting updateSSSP" << std::endl;
     
-        // Check if any vertices are affected initially
         for (const auto& vertex : local_graph) {
             if (vertex.affected) {
                 local_changes = true;
@@ -605,11 +595,9 @@ public:
     
         do {
             std::cerr << "Rank " << rank << ": Iteration " << iteration++ << ", local_changes=" << local_changes << std::endl;
-            bool iteration_changes = false; // Track changes in this iteration
+            bool iteration_changes = false; 
     
-            // Skip processing if no changes are expected
             if (local_changes) {
-                // Process local updates using OpenMP
                 #pragma omp parallel
                 {
                     bool thread_local_changes = false;
@@ -618,25 +606,19 @@ public:
                         Vertex& vertex = local_graph[i];
                         if (!vertex.affected) continue;
     
-                        // Reset for this iteration
                         #pragma omp atomic write
                         vertex.affected = false;
     
-                        // Process each neighbor
                         for (const auto& edge : vertex.neighbors) {
                             int v = edge.first;
                             int weight = edge.second;
     
-                            // If v is a global ID (boundary vertex)
                             if (global_to_local.find(v) == global_to_local.end()) {
-                                // Will be handled in synchronization
                                 continue;
                             }
     
-                            // Convert to local ID
                             int local_v = global_to_local[v];
     
-                            // Relax edge
                             int new_dist = vertex.distance + weight;
                             if (new_dist < local_graph[local_v].distance) {
                                 #pragma omp critical
@@ -646,7 +628,6 @@ public:
                                     local_graph[local_v].affected = true;
                                     thread_local_changes = true;
     
-                                    // If this is a boundary vertex, prepare update for other partitions
                                     if (local_graph[local_v].boundary) {
                                         BoundaryUpdate update;
                                         update.global_vertex_id = local_to_global[local_v];
@@ -658,7 +639,7 @@ public:
                             }
                         }
                     }
-                    // Aggregate thread-local changes
+
                     if (thread_local_changes) {
                         #pragma omp critical
                         iteration_changes = true;
@@ -676,24 +657,22 @@ public:
             }
             std::cerr << std::endl;
     
-            // Synchronize boundary information
             synchronizeBoundaries();
     
             std::cerr << "Rank " << rank << ": After synchronizeBoundaries, before Allreduce" << std::endl;
     
-            // Check if any process still has changes
             MPI_Allreduce(&local_changes, &global_changes, 1, MPI_C_BOOL, MPI_LOR, MPI_COMM_WORLD);
             std::cerr << "Rank " << rank << ": After Allreduce, global_changes=" << global_changes << std::endl;
         } while (global_changes);
         std::cerr << "Rank " << rank << ": Finished updateSSSP after " << iteration << " iterations" << std::endl;
     }
 
+    // Synchronizes boundary vertex information across all processes
     void synchronizeBoundaries() {
         int send_count = send_buffer.size();
         std::vector<int> recv_counts(size);
         std::cerr << "Rank " << rank << ": Starting synchronizeBoundaries, send_count=" << send_count << std::endl;
     
-        // Get counts from all processes
         MPI_Allgather(&send_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
         std::cerr << "Rank " << rank << ": Received counts";
         for (int i = 0; i < size; i++) {
@@ -701,7 +680,6 @@ public:
         }
         std::cerr << std::endl;
     
-        // Calculate displacements and total receive size
         std::vector<int> displacements(size, 0);
         int total_recv = 0;
         bool all_zero = true;
@@ -721,7 +699,6 @@ public:
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     
-        // Skip communication if no updates to exchange
         if (all_zero) {
             std::cerr << "Rank " << rank << ": No boundary updates to exchange, skipping MPI_Allgatherv" << std::endl;
             send_buffer.clear();
@@ -729,11 +706,9 @@ public:
             return;
         }
     
-        // Allocate receive buffer
         recv_buffer.resize(std::max(1, total_recv));
         std::cerr << "Rank " << rank << ": Allocated recv_buffer, size=" << recv_buffer.size() << std::endl;
     
-        // Create MPI datatype for boundary updates
         MPI_Datatype mpi_boundary_update;
         int blocklengths[3] = {1, 1, 1};
         MPI_Aint disps[3];
@@ -750,10 +725,8 @@ public:
         MPI_Type_create_struct(3, blocklengths, disps, types, &mpi_boundary_update);
         MPI_Type_commit(&mpi_boundary_update);
     
-        // Use a valid empty buffer for zero-sized sends
         std::vector<BoundaryUpdate> empty_buffer(1);
     
-        // Perform the allgatherv operation
         std::cerr << "Rank " << rank << ": Before MPI_Allgatherv" << std::endl;
         MPI_Allgatherv(
             send_count > 0 ? send_buffer.data() : empty_buffer.data(),
@@ -769,61 +742,54 @@ public:
     
         MPI_Type_free(&mpi_boundary_update);
     
-        // Process only the actual received updates
         for (int i = 0; i < total_recv; i++) {
             const auto& update = recv_buffer[i];
             std::cerr << "Rank " << rank << ": Processing update for global_vertex_id=" << update.global_vertex_id << std::endl;
-            if (vertex_partition[update.global_vertex_id] == rank) continue; // Skip our own vertices
+            if (vertex_partition[update.global_vertex_id] == rank) continue; 
             processReceivedUpdate(update);
         }
     
-        // Clear send buffer for next round
         send_buffer.clear();
         std::cerr << "Rank " << rank << ": Finished synchronizeBoundaries, received " << total_recv << " updates" << std::endl;
     }
     
+    // Processes a received boundary update from another process
     void processReceivedUpdate(const BoundaryUpdate& update) {
         int global_v = update.global_vertex_id;
         int global_parent = update.new_parent;
         int new_dist = update.new_distance;
     
-        // If this is a query response, skip for now (not implemented)
         if (new_dist == -1) {
             return;
         }
     
         bool local_changes = false;
     
-        // Check if we have this vertex locally
         if (global_to_local.find(global_v) != global_to_local.end()) {
             int local_v = global_to_local[global_v];
     
-            // Update the distance if it's better
             if (new_dist < local_graph[local_v].distance) {
                 local_graph[local_v].distance = new_dist;
                 local_graph[local_v].affected = true;
                 local_changes = true;
     
-                // Update parent if possible
                 if (global_to_local.find(global_parent) != global_to_local.end()) {
                     local_graph[local_v].parent = global_to_local[global_parent];
                 } else {
-                    local_graph[local_v].parent = -1; // Cross-partition parent
+                    local_graph[local_v].parent = -1;
                 }
             }
         }
     
-        // Check all edges connecting to this vertex
         for (auto& vertex : local_graph) {
             for (const auto& edge : vertex.neighbors) {
                 if (edge.first == global_v) {
                     int weight = edge.second;
                     int potential_dist = new_dist + weight;
     
-                    // If this provides a better path
                     if (potential_dist < vertex.distance) {
                         vertex.distance = potential_dist;
-                        vertex.parent = -1; // Cross-partition parent
+                        vertex.parent = -1; 
                         vertex.affected = true;
                         local_changes = true;
                     }
@@ -831,13 +797,12 @@ public:
             }
         }
     
-        // If changes were made, ensure they propagate in the next iteration
         if (local_changes && !update_queue.empty()) {
             update_queue.push({new_dist, global_v});
         }
     }
     
-    // Add this helper function to the ParallelDynamicSSSP class
+    // Helper function for MPI_Allgatherv with a timeout
     bool mpiAllgathervWithTimeout(void* sendbuf, int sendcount, MPI_Datatype sendtype,
         void* recvbuf, int* recvcounts, int* displs, MPI_Datatype recvtype,
         MPI_Comm comm, double timeout_seconds) {
@@ -851,16 +816,14 @@ public:
         if (completed) return true;
         }
 
-        // Timeout occurred
         std::cerr << "Rank " << rank << ": MPI_Allgatherv timed out after " << timeout_seconds << " seconds" << std::endl;
         MPI_Cancel(&request);
         MPI_Request_free(&request);
         return false;
     }
 
-    // Check if load balancing is needed
+    // Checks if load balancing (repartitioning) is needed
     bool checkLoadBalance() {
-        // Count active vertices in this partition
         int local_active = 0;
         for (const auto& vertex : local_graph) {
             if (vertex.affected) {
@@ -868,11 +831,9 @@ public:
             }
         }
         
-        // Gather active vertex counts from all processes
         std::vector<int> active_counts(size);
         MPI_Allgather(&local_active, 1, MPI_INT, active_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
         
-        // Calculate mean and max
         int total_active = 0;
         int max_active = 0;
         for (int count : active_counts) {
@@ -880,38 +841,36 @@ public:
             max_active = std::max(max_active, count);
         }
         
-        // If there are no active vertices, no need to rebalance
         if (total_active == 0) return false;
         
         double mean_active = static_cast<double>(total_active) / size;
         double imbalance = max_active / mean_active;
         
-        // If imbalance exceeds threshold, trigger rebalancing
-        const double IMBALANCE_THRESHOLD = 1.5; // Adjust based on your needs
+        const double IMBALANCE_THRESHOLD = 1.5; 
         return imbalance > IMBALANCE_THRESHOLD;
     }
     
-    // Repartition the graph using ParMETIS
+    // Repartitions the graph (placeholder for ParMETIS usage)
     void repartitionGraph() {
-        // This is a simplified version; in practice, you would use ParMETIS
+        // This is a simplified version; in practice, we would use ParMETIS
         // to perform distributed graph partitioning
         
         // For now, we'll print a message and skip actual repartitioning
         if (rank == 0) {
             std::cout << "Load imbalance detected. Repartitioning would be triggered here." << std::endl;
         }
-        
-        // In real implementation, you would:
+
+        // In real implementation, we would have to:
         // 1. Convert local graph to ParMETIS format
         // 2. Call ParMETIS_V3_PartKway
         // 3. Redistribute vertices based on new partitioning
         // 4. Rebuild local graphs and boundary information
     }
     
+    // Gathers and returns the SSSP result from all processes
     std::vector<std::pair<int, int>> getResult() {
         std::cerr << "Rank " << rank << ": Entering getResult, local_graph.size=" << local_graph.size() << std::endl;
     
-        // Prepare local results
         std::vector<std::pair<int, int>> local_result;
         for (size_t i = 0; i < local_graph.size(); i++) {
             int distance = local_graph[i].distance;
@@ -925,12 +884,10 @@ public:
         int local_count = local_result.size();
         std::cerr << "Rank " << rank << ": local_count=" << local_count << std::endl;
     
-        // Gather counts from all processes
         std::vector<int> recv_counts(size);
         MPI_Allgather(&local_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
         std::cerr << "Rank " << rank << ": Completed MPI_Allgather for counts" << std::endl;
     
-        // Calculate displacements for gatherv
         std::vector<int> displacements(size, 0);
         int total_count = 0;
         for (int i = 0; i < size; i++) {
@@ -946,7 +903,6 @@ public:
         
         std::cerr << "Rank " << rank << ": Total vertex count from all processes: " << total_count << std::endl;
         
-        // Create MPI datatype for result pairs
         MPI_Datatype mpi_result_type;
         int blocklengths[2] = {1, 1};
         MPI_Aint disps[2];
@@ -961,10 +917,8 @@ public:
         MPI_Type_create_struct(2, blocklengths, disps, types, &mpi_result_type);
         MPI_Type_commit(&mpi_result_type);
     
-        // All ranks prepare buffer for results
         std::vector<std::pair<int, int>> global_result(total_count);
         
-        // Use Allgatherv instead of Gatherv to avoid deadlock
         std::cerr << "Rank " << rank << ": Starting MPI_Allgatherv, local_count=" << local_count << std::endl;
         MPI_Allgatherv(
             local_count > 0 ? local_result.data() : nullptr, local_count, mpi_result_type,
@@ -975,10 +929,8 @@ public:
     
         MPI_Type_free(&mpi_result_type);
     
-        // Sort results by vertex ID
         std::sort(global_result.begin(), global_result.end());
     
-        // Only rank 0 prints the results, but all ranks have them
         if (rank == 0) {
             std::cerr << "Rank 0: Result collection complete, global_result.size=" << global_result.size() << std::endl;
             for (const auto& entry : global_result) {
@@ -1083,7 +1035,7 @@ int main(int argc, char* argv[]) {
 
     std::vector<EdgeChange> changes;
     if (rank == 0) {
-        // No edge changes for file-based input by default
+        // No edge changes for file-based input by default  
     }
     
     int num_changes = changes.size();
