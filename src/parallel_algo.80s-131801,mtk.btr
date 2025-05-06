@@ -1,0 +1,7 @@
+
+parallel_algo:131801 terminated with signal 11 at PC=55a54598fd1b SP=7ffe74f3f760.  Backtrace:
+./parallel_algo(+0x3d1b) [0x55a54598fd1b]
+./parallel_algo(+0x2a90) [0x55a54598ea90]
+/lib/x86_64-linux-gnu/libc.so.6(+0x29ca8) [0x7f79cbc33ca8]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x85) [0x7f79cbc33d65]
+./parallel_algo(+0x22f1) [0x55a54598e2f1]
