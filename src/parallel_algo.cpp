@@ -9,46 +9,38 @@
 #include <iostream>
 #include <metis.h>
 
-// Structure to represent a vertex in the graph
 struct Vertex {
     int id;
-    std::vector<std::pair<int, int>> neighbors; // <neighbor_id, weight>
-    int distance;  // Distance from source
-    int parent;    // Parent in the shortest path tree
-    bool affected; // Whether the vertex is affected by recent changes
-    bool boundary; // Whether the vertex is a boundary vertex
+    std::vector<std::pair<int, int>> neighbors;
+    int distance;
+    int parent;
+    bool affected;
+    bool boundary;
 };
 
-// Structure to represent an edge change
 struct EdgeChange {
-    int u, v;      // Edge endpoints
-    int weight;    // New weight (use -1 for deletion)
-    bool insertion; // True if insertion, false if deletion
+    int u, v;
+    int weight;
+    bool insertion;
 };
 
-// Class for Parallel SSSP
 class ParallelDynamicSSSP {
 private:
-    // Graph data
     std::vector<Vertex> local_graph;
-    std::unordered_map<int, int> global_to_local; // Map global vertex IDs to local IDs
-    std::unordered_map<int, int> local_to_global; // Map local vertex IDs to global IDs
+    std::unordered_map<int, int> global_to_local;
+    std::unordered_map<int, int> local_to_global;
     
-    // MPI-related data
     int rank;
     int size;
     int source_vertex;
     int num_vertices;
     
-    // Partition information
-    std::vector<int> vertex_partition; // Which partition each vertex belongs to
-    std::vector<std::unordered_set<int>> boundary_vertices; // Boundary vertices for each partition
+    std::vector<int> vertex_partition;
+    std::vector<std::unordered_set<int>> boundary_vertices;
     
-    // Priority queue for distance updates (min-heap based on distance)
-    using PQEntry = std::pair<int, int>; // <distance, vertex_id>
+    using PQEntry = std::pair<int, int>;
     std::priority_queue<PQEntry, std::vector<PQEntry>, std::greater<PQEntry>> update_queue;
     
-    // Buffer for communication
     struct BoundaryUpdate {
         int global_vertex_id;
         int new_distance;
@@ -60,7 +52,6 @@ private:
 public:
     ParallelDynamicSSSP(int my_rank, int num_procs, int source) 
         : rank(my_rank), size(num_procs), source_vertex(source) {
-        // Initialize MPI buffers
         boundary_vertices.resize(size);
     }
     
@@ -68,7 +59,6 @@ public:
         std::cerr << "Rank " << rank << ": Entering loadAndPartitionGraph, num_vertices=" << num_vertices << ", edges=" << edges.size() << std::endl;
         this->num_vertices = num_vertices;
         
-        // Building adjacency list
         std::vector<std::vector<std::pair<int, int>>> adj_list(num_vertices);
         for (const auto& edge : edges) {
             int u = std::get<0>(edge);
@@ -83,16 +73,13 @@ public:
         }
         std::cerr << "Rank " << rank << ": Adjacency list created, size=" << adj_list.size() << std::endl;
         
-        // Manual partitioning for small graphs to ensure balanced distribution
         vertex_partition.resize(num_vertices);
         for (int i = 0; i < num_vertices; i++) {
             vertex_partition[i] = i % size;
             std::cerr << "Rank " << rank << ": Vertex " << i << " assigned to partition " << vertex_partition[i] << std::endl;
         }
         
-        // For larger graphs, use METIS
         if (num_vertices > size * 5) {
-            // Initialize METIS arrays
             idx_t nvtxs = num_vertices;
             idx_t ncon = 1;
             idx_t nparts = size;
@@ -101,7 +88,6 @@ public:
             std::vector<idx_t> adjncy;
             std::vector<idx_t> adjwgt;
             
-            // Convert adjacency list to CSR format for METIS
             int edge_count = 0;
             for (int i = 0; i < num_vertices; i++) {
                 xadj[i] = edge_count;
@@ -113,7 +99,6 @@ public:
             }
             xadj[num_vertices] = edge_count;
             
-            // Run METIS partitioning
             std::vector<idx_t> part(num_vertices);
             idx_t objval;
             
@@ -132,18 +117,15 @@ public:
             std::cerr << "Rank " << rank << ": METIS partitioning succeeded, edge-cut=" << objval << std::endl;
         }
         
-        // Log vertices owned by this rank
         for (int i = 0; i < num_vertices; ++i) {
             if (vertex_partition[i] == rank) {
                 std::cerr << "Rank " << rank << ": Owns vertex " << i << std::endl;
             }
         }
         
-        // Build local graph
         buildLocalGraph(adj_list, num_vertices);
         std::cerr << "Rank " << rank << ": buildLocalGraph completed, local_graph.size=" << local_graph.size() << std::endl;
         
-        // Identify boundary vertices
         identifyBoundaryVertices(adj_list);
         std::cerr << "Rank " << rank << ": loadAndPartitionGraph completed" << std::endl;
     }
@@ -202,13 +184,11 @@ public:
     void identifyBoundaryVertices(const std::vector<std::vector<std::pair<int, int>>>& adj_list) {
         std::cerr << "Rank " << rank << ": Entering identifyBoundaryVertices" << std::endl;
         
-        // Initialize boundary_vertices for all ranks
         boundary_vertices.resize(size);
         for (int i = 0; i < size; i++) {
             boundary_vertices[i].clear();
         }
         
-        // Identify local boundary vertices
         for (int global_id = 0; global_id < adj_list.size(); global_id++) {
             if (vertex_partition[global_id] == rank) {
                 int local_id = global_to_local[global_id];
@@ -232,12 +212,10 @@ public:
             }
         }
         
-        // Log local boundary vertices
         for (int i = 0; i < size; i++) {
             std::cerr << "Rank " << rank << ": Local boundary_vertices[" << i << "] size=" << boundary_vertices[i].size() << std::endl;
         }
         
-        // Collect boundary vertex counts from all ranks
         std::vector<int> send_buffer;
         for (int i = 0; i < size; i++) {
             if (i != rank) {
@@ -257,7 +235,6 @@ public:
         }
         std::cerr << std::endl;
         
-        // Calculate displacements and total receive size
         std::vector<int> displacements(size, 0);
         int total_recv = 0;
         for (int i = 0; i < size; i++) {
@@ -267,8 +244,7 @@ public:
             }
         }
         
-        // Validate buffer sizes
-        if (total_recv < 0 || total_recv > 1000) { // Arbitrary upper limit for safety
+        if (total_recv < 0 || total_recv > 1000) {
             std::cerr << "Rank " << rank << ": Invalid total_recv=" << total_recv << std::endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -280,7 +256,6 @@ public:
             MPI_COMM_WORLD
         );
         
-        // Update boundary_vertices with received data
         for (int i = 0; i < size; i++) {
             if (i == rank) continue;
             for (int j = displacements[i]; j < displacements[i] + recv_counts[i]; j++) {
@@ -288,7 +263,6 @@ public:
             }
         }
         
-        // Log final boundary vertices
         for (int i = 0; i < size; i++) {
             std::cerr << "Rank " << rank << ": Final boundary_vertices[" << i << "] size=" << boundary_vertices[i].size();
             std::cerr << ", vertices:";
@@ -376,42 +350,35 @@ public:
         bool local_changes = false;
         std::cerr << "Rank " << rank << ": Starting processEdgeChanges, num_changes=" << changes.size() << std::endl;
     
-        // Process each edge change
         for (const auto& change : changes) {
             std::cerr << "Rank " << rank << ": Processing edge change (" << change.u << "," << change.v << "), weight=" 
                       << change.weight << ", insertion=" << change.insertion << std::endl;
     
-            // Check if the edge belongs to this partition
             bool u_is_local = (vertex_partition[change.u] == rank);
             bool v_is_local = (vertex_partition[change.v] == rank);
     
             if (!u_is_local && !v_is_local) {
                 std::cerr << "Rank " << rank << ": Edge not in this partition, skipping" << std::endl;
-                continue; // Edge not in this partition
+                continue;
             }
     
             local_changes = true;
     
-            // Process edge insertion/deletion
             if (change.insertion) {
-                // Insert edge
                 if (u_is_local) {
                     int local_u = global_to_local[change.u];
                     if (v_is_local) {
-                        // Both endpoints in this partition
                         int local_v = global_to_local[change.v];
                         local_graph[local_u].neighbors.emplace_back(local_v, change.weight);
                         local_graph[local_v].neighbors.emplace_back(local_u, change.weight);
                         std::cerr << "Rank " << rank << ": Added local edge (" << local_u << "," << local_v << ")" << std::endl;
                     } else {
-                        // v is in another partition
                         local_graph[local_u].neighbors.emplace_back(change.v, change.weight);
                         local_graph[local_u].boundary = true;
                         boundary_vertices[vertex_partition[change.v]].insert(change.u);
                         std::cerr << "Rank " << rank << ": Added boundary edge from " << change.u << " to " << change.v << std::endl;
                     }
                 } else if (v_is_local) {
-                    // u is in another partition, v is local
                     int local_v = global_to_local[change.v];
                     local_graph[local_v].neighbors.emplace_back(change.u, change.weight);
                     local_graph[local_v].boundary = true;
@@ -419,10 +386,8 @@ public:
                     std::cerr << "Rank " << rank << ": Added boundary edge from " << change.u << " to " << change.v << std::endl;
                 }
     
-                // Check if the new edge provides a shorter path
                 updateAfterEdgeInsertion(change.u, change.v, change.weight);
             } else {
-                // Delete edge (unchanged, included for completeness)
                 if (u_is_local) {
                     int local_u = global_to_local[change.u];
                     if (v_is_local) {
@@ -475,7 +440,6 @@ public:
             }
         }
     
-        // Always call updateSSSP to ensure all ranks participate in collectives
         std::cerr << "Rank " << rank << ": updateSSSP called after edge changes (local_changes=" << local_changes << ")" << std::endl;
         updateSSSP();
     }
