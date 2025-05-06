@@ -967,7 +967,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::tuple<int, int, int>> edges;
     int num_vertices = 0;
     if (rank == 0) {
-        std::ifstream infile("graph.txt");
+        std::ifstream infile("graph2.txt");
         std::string line;
         int max_node = -1;
         while (std::getline(infile, line)) {
